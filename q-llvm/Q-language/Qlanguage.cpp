@@ -11,11 +11,21 @@
 #include <utility>
 #include <vector>
 
-// Q's first front end: lexer, parser, and AST.
-//
-// LLVM is deliberately not included yet.  The AST is the boundary between Q's
-// syntax and the LLVM IR generator that will be added in the next tutorial
-// step.
+#ifdef Q_ENABLE_LLVM
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/raw_ostream.h"
+#include <unordered_map>
+#endif
+
+// Q's front end remains usable without LLVM. Define Q_ENABLE_LLVM to build
+// the first IR increment: scalar arithmetic and single-expression functions.
 
 namespace q {
 
@@ -496,6 +506,130 @@ private:
   std::vector<std::unique_ptr<TopLevelAST>> items_;
 };
 
+#ifdef Q_ENABLE_LLVM
+//===----------------------------------------------------------------------===//
+// LLVM IR, increment 1: scalar arithmetic functions
+//===----------------------------------------------------------------------===//
+
+// Use the AST's existing accessors so parsing and dumping stay LLVM-independent.
+class IRGenerator {
+public:
+  bool emit(const ProgramAST &program) {
+    std::size_t expressionIndex = 0;
+    for (const auto &item : program.items()) {
+      if (const auto *function = dynamic_cast<const FunctionAST *>(item.get())) {
+        if (!emitFunction(function->prototype(), function->body()))
+          return false;
+      } else if (const auto *expression =
+                     dynamic_cast<const TopLevelExprAST *>(item.get())) {
+        // A dot cannot occur in a Q identifier, preventing user-name collisions.
+        PrototypeAST prototype("__q_expr." + std::to_string(expressionIndex++),
+                               {}, expression->location());
+        if (!emitFunction(prototype, expression->expression()))
+          return false;
+      } else {
+        error(item->location(),
+              "LLVM IR for 'foreign' is not supported in this increment");
+        return false;
+      }
+    }
+
+    // Never print a partial module when parsing or code generation fails.
+    if (llvm::verifyModule(module_, &llvm::errs()))
+      return false;
+    module_.print(llvm::outs(), nullptr);
+    return true;
+  }
+
+private:
+  llvm::LLVMContext context_;
+  llvm::Module module_{"q", context_};
+  llvm::IRBuilder<> builder_{context_};
+  std::unordered_map<std::string, llvm::Value *> namedValues_;
+
+  llvm::Value *error(SourceLocation location, const std::string &message) {
+    std::cerr << location.line << ':' << location.column
+              << ": error: " << message << '\n';
+    return nullptr;
+  }
+
+  llvm::Value *emitExpression(const ExprAST &expression) {
+    if (const auto *number = dynamic_cast<const NumberExprAST *>(&expression))
+      return llvm::ConstantFP::get(llvm::Type::getDoubleTy(context_),
+                                  number->value());
+
+    if (const auto *name = dynamic_cast<const NameExprAST *>(&expression)) {
+      const auto found = namedValues_.find(name->name());
+      if (found == namedValues_.end())
+        return error(name->location(), "unknown name '" + name->name() + "'");
+      return found->second;
+    }
+
+    if (const auto *unary = dynamic_cast<const UnaryExprAST *>(&expression)) {
+      if (unary->op() != "+" && unary->op() != "-")
+        return error(unary->location(),
+                     "LLVM IR for unary operator '" + unary->op() +
+                         "' is not supported in this increment");
+      llvm::Value *operand = emitExpression(unary->operand());
+      if (!operand)
+        return nullptr;
+      return unary->op() == "+" ? operand : builder_.CreateFNeg(operand, "neg");
+    }
+
+    if (const auto *binary = dynamic_cast<const BinaryExprAST *>(&expression)) {
+      const std::string &op = binary->op();
+      if (op != "+" && op != "-" && op != "*" && op != "/")
+        return error(binary->location(),
+                     "LLVM IR for binary operator '" + op +
+                         "' is not supported in this increment");
+      llvm::Value *left = emitExpression(binary->left());
+      if (!left)
+        return nullptr;
+      llvm::Value *right = emitExpression(binary->right());
+      if (!right)
+        return nullptr;
+      if (op == "+")
+        return builder_.CreateFAdd(left, right, "add");
+      if (op == "-")
+        return builder_.CreateFSub(left, right, "sub");
+      if (op == "*")
+        return builder_.CreateFMul(left, right, "mul");
+      return builder_.CreateFDiv(left, right, "div");
+    }
+
+    return error(expression.location(),
+                 "LLVM IR for calls and pipelines is not supported in this increment");
+  }
+
+  bool emitFunction(const PrototypeAST &prototype, const ExprAST &body) {
+    if (module_.getFunction(prototype.name())) {
+      error(prototype.location(), "duplicate function '" + prototype.name() + "'");
+      return false;
+    }
+
+    llvm::Type *numberType = llvm::Type::getDoubleTy(context_);
+    std::vector<llvm::Type *> parameters(prototype.parameters().size(), numberType);
+    auto *type = llvm::FunctionType::get(numberType, parameters, false);
+    auto *function = llvm::Function::Create(type, llvm::Function::ExternalLinkage,
+                                          prototype.name(), module_);
+    namedValues_.clear();
+    std::size_t index = 0;
+    for (auto &argument : function->args()) {
+      const std::string &name = prototype.parameters()[index++];
+      argument.setName(name);
+      namedValues_[name] = &argument;
+    }
+
+    builder_.SetInsertPoint(llvm::BasicBlock::Create(context_, "entry", function));
+    llvm::Value *result = emitExpression(body);
+    if (!result)
+      return false;
+    builder_.CreateRet(result);
+    return !llvm::verifyFunction(*function, &llvm::errs());
+  }
+};
+#endif
+
 //===----------------------------------------------------------------------===//
 // Recursive-descent and precedence-climbing parser
 //===----------------------------------------------------------------------===//
@@ -785,17 +919,12 @@ private:
 
 } // namespace q
 
-static bool readSource(int argc, char **argv, std::string &source) {
-  if (argc > 2) {
-    std::cerr << "usage: " << argv[0] << " [source.q]\n";
-    return false;
-  }
-
+static bool readSource(const char *filename, std::string &source) {
   std::ostringstream buffer;
-  if (argc == 2) {
-    std::ifstream input(argv[1]);
+  if (filename) {
+    std::ifstream input(filename);
     if (!input) {
-      std::cerr << "error: could not open '" << argv[1] << "'\n";
+      std::cerr << "error: could not open '" << filename << "'\n";
       return false;
     }
     buffer << input.rdbuf();
@@ -808,8 +937,24 @@ static bool readSource(int argc, char **argv, std::string &source) {
 }
 
 int main(int argc, char **argv) {
+  const bool emitLLVM = argc > 1 && std::string(argv[1]) == "--emit-llvm";
+  const bool dumpAST = argc > 1 && std::string(argv[1]) == "--dump-ast";
+  const int sourceIndex = (emitLLVM || dumpAST) ? 2 : 1;
+  if (argc > sourceIndex + 1 ||
+      (argc > sourceIndex && argv[sourceIndex][0] == '-')) {
+    std::cerr << "usage: " << argv[0]
+              << " [--dump-ast | --emit-llvm] [source.q]\n";
+    return 2;
+  }
+#ifndef Q_ENABLE_LLVM
+  if (emitLLVM) {
+    std::cerr << "error: --emit-llvm requires a build with Q_ENABLE_LLVM; see QL.md\n";
+    return 2;
+  }
+#endif
+
   std::string source;
-  if (!readSource(argc, argv, source))
+  if (!readSource(argc > sourceIndex ? argv[sourceIndex] : nullptr, source))
     return 2;
 
   q::Parser parser(std::move(source));
@@ -821,6 +966,12 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+#ifdef Q_ENABLE_LLVM
+  if (emitLLVM) {
+    q::IRGenerator generator;
+    return generator.emit(*program) ? 0 : 1;
+  }
+#endif
   program->dump(std::cout);
   return 0;
 }
