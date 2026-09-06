@@ -969,7 +969,7 @@ int main(int argc, char **argv) {
   }
 #ifndef Q_ENABLE_LLVM
   if (emitLLVM) {
-    std::cerr << "error: --emit-llvm requires a build with Q_ENABLE_LLVM; see QL.md\n";
+    std::cerr << "error: --emit-llvm requires a build with Q_ENABLE_LLVM; see docs/QL.md\n";
     return 2;
   }
 #endif

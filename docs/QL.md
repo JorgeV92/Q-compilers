@@ -15,6 +15,11 @@ learning. The first two LLVM increments support numeric expressions, function
 parameters, and calls between Q functions. Python-style blocks, tensors, and training
 are future work; the current Q syntax remains the foundation.
 
+The compiler is in [src/qlang.cpp](../src/qlang.cpp), with runnable inputs in
+[examples/](../examples/) and checks in [tests/](../tests/). See the
+[README](../README.md) for the project layout and quick start. All commands
+below run from the repository root.
+
 ## What makes Q different
 
 Kaleidoscope uses `def`, `extern`, whitespace-separated parameters, and `#`
@@ -175,17 +180,15 @@ in the same file.
 
 The AST-only build still needs only a C++17 compiler:
 
-From `q-llvm/Q-language`:
-
 ```sh
-clang++ -std=c++17 -Wall -Wextra -Wpedantic Qlanguage.cpp -o qlang
-./qlang program.q
+make ast
+./build/qlang-ast examples/calls.q
 ```
 
 It can also read standard input:
 
 ```sh
-printf 'fn square(x) => x * x; 5 |> square;' | ./qlang
+printf 'fn square(x) => x * x; 5 |> square;' | ./build/qlang-ast
 ```
 
 For valid input, `qlang` prints `Program` followed by its AST. Syntax errors are
@@ -193,15 +196,28 @@ printed to standard error and produce a nonzero exit status.
 
 ### Build with LLVM IR support
 
-With LLVM development headers, libraries, and `llvm-config` on `PATH`, run from
-`q-llvm/Q-language` (tested with LLVM 20.1.7):
+With LLVM development headers, libraries, and `llvm-config` on `PATH`
+(tested with LLVM 20.1.7):
 
 ```sh
-clang++ -DQ_ENABLE_LLVM Qlanguage.cpp \
-  $(llvm-config --cxxflags --ldflags --system-libs --libs core) -o qlang
-./qlang --emit-llvm examples/scalars.q > scalars.ll
-llvm-as scalars.ll -o /tmp/q-scalars.bc
-./qlang --dump-ast examples/scalars.q
+make
+./build/qlang --emit-llvm examples/scalars.q > build/scalars.ll
+llvm-as build/scalars.ll -o build/scalars.bc
+./build/qlang --dump-ast examples/scalars.q
+```
+
+`make` (or `make llvm`) builds `build/qlang`; `make ast` builds a separate
+`build/qlang-ast` without consulting LLVM tools. This lets both builds coexist.
+Set `LLVM_CONFIG` when using a versioned or non-default installation, for
+example `make LLVM_CONFIG=llvm-config-20`.
+
+The [Makefile](../Makefile) keeps the underlying compiler commands visible.
+For a direct LLVM-enabled build:
+
+```sh
+mkdir -p build
+clang++ -DQ_ENABLE_LLVM src/qlang.cpp \
+  $(llvm-config --cxxflags --ldflags --system-libs --libs core) -o build/qlang
 ```
 
 Both modes accept a source filename or read standard input when it is omitted.
@@ -213,7 +229,7 @@ even if earlier functions were valid. Command-line errors exit with status 2.
 ## LLVM increment 1: scalar arithmetic
 
 This is one reviewable step toward Chapter 3, with the implementation grouped
-in `IRGenerator` inside `Qlanguage.cpp`.
+in `IRGenerator` inside [src/qlang.cpp](../src/qlang.cpp).
 
 ```q
 fn linear(x, weight, bias) => x * weight + bias;
@@ -282,8 +298,8 @@ loss(7, 4);
 Generate IR for this example with:
 
 ```sh
-./qlang --emit-llvm examples/calls.q > calls.ll
-llvm-as calls.ll -o /tmp/q-calls.bc
+./build/qlang --emit-llvm examples/calls.q > build/calls.ll
+llvm-as build/calls.ll -o build/calls.bc
 ```
 
 `IRGenerator::emitExpression()` handles `CallExprAST` by looking up the callee
@@ -310,22 +326,24 @@ reports `incorrect argument count for 'square': expected 1, got 2`.
 
 ### Check the IR increments
 
-After building the LLVM-enabled `qlang`, run:
+Build the LLVM-enabled compiler and run its tests:
 
 ```sh
-python3 tests/test_ir.py ./qlang
+make test
 ```
 
-The test requires `llvm-as` and `clang` on `PATH` (overridable with `LLVM_AS` and
-`CLANG`). It assembles the IR, compiles it with a small C caller, and checks
+You can also run `python3 tests/test_ir.py build/qlang` directly. The Makefile
+selects `llvm-as` from the `LLVM_CONFIG` installation and uses `clang` on `PATH`;
+both tools are overridable with `LLVM_AS` and `CLANG`. The test assembles the
+IR, compiles it with a small C caller, and checks
 numeric results, nested and zero-argument calls, argument order, definition
 order, parameter scope, rejected features, diagnostics, and AST mode.
 Temporary build files are cleaned up automatically.
 
 ## Small increments toward Python-style ML
 
-Review and commit the function-call increment before adding the next feature.
-Suggested commit message: `Add LLVM IR generation for function calls`.
+Keep each language feature in its own commit with its example and tests.
+Review layout changes separately from language changes.
 
 1. **Next:** `foreign` declarations, including agreement between declarations
    and definitions, so Q can call native math functions.

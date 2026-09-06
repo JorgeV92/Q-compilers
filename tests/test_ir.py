@@ -1,4 +1,4 @@
-"""Run with: python3 tests/test_ir.py /path/to/LLVM-enabled/qlang."""
+"""Run from the repository root: make test (or python3 tests/test_ir.py build/qlang)."""
 
 import os
 from pathlib import Path
