@@ -25,7 +25,7 @@
 #endif
 
 // Q's front end remains usable without LLVM. Define Q_ENABLE_LLVM to build
-// the first IR increment: scalar arithmetic and single-expression functions.
+// scalar arithmetic, single-expression functions, and calls to Q functions.
 
 namespace q {
 
@@ -508,7 +508,7 @@ private:
 
 #ifdef Q_ENABLE_LLVM
 //===----------------------------------------------------------------------===//
-// LLVM IR, increment 1: scalar arithmetic functions
+// LLVM IR: scalar arithmetic functions and calls
 //===----------------------------------------------------------------------===//
 
 // Use the AST's existing accessors so parsing and dumping stay LLVM-independent.
@@ -597,8 +597,29 @@ private:
       return builder_.CreateFDiv(left, right, "div");
     }
 
+    if (const auto *call = dynamic_cast<const CallExprAST *>(&expression)) {
+      // Functions enter the module in source order; later definitions are unknown.
+      llvm::Function *callee = module_.getFunction(call->callee());
+      if (!callee)
+        return error(call->location(), "unknown function '" + call->callee() + "'");
+      if (callee->arg_size() != call->arguments().size())
+        return error(call->location(),
+                     "incorrect argument count for '" + call->callee() +
+                         "': expected " + std::to_string(callee->arg_size()) +
+                         ", got " + std::to_string(call->arguments().size()));
+
+      std::vector<llvm::Value *> arguments;
+      for (const auto &argument : call->arguments()) {
+        llvm::Value *value = emitExpression(*argument);
+        if (!value)
+          return nullptr;
+        arguments.push_back(value);
+      }
+      return builder_.CreateCall(callee, arguments, "call");
+    }
+
     return error(expression.location(),
-                 "LLVM IR for calls and pipelines is not supported in this increment");
+                 "LLVM IR for pipelines is not supported in this increment");
   }
 
   bool emitFunction(const PrototypeAST &prototype, const ExprAST &body) {

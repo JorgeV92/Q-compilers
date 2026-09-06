@@ -11,8 +11,8 @@ JIT—but it has its own source syntax and room for its own semantics.
 4. The optional **IR generator** translates scalar arithmetic functions to LLVM IR.
 
 The long-term goal is a Python-style language for machine learning and deep
-learning. This checkpoint adds the first small LLVM increment: numeric
-expressions and function parameters. Python-style blocks, tensors, and training
+learning. The first two LLVM increments support numeric expressions, function
+parameters, and calls between Q functions. Python-style blocks, tensors, and training
 are future work; the current Q syntax remains the foundation.
 
 ## What makes Q different
@@ -37,7 +37,7 @@ value |> transform       // transform(value)
 value |> scale(2)        // scale(value, 2)
 ```
 
-The parser records pipelines, but this first IR increment does not compile
+The parser records pipelines, but the current IR generator does not compile
 them. Nothing is executed by the front end yet.
 
 ## A first Q program
@@ -235,7 +235,7 @@ uses LLVM floating-point behavior rather than raising a Python exception.
 There are no integer or boolean types yet. A name must refer to a parameter of
 the current function; parameter names do not carry over to other functions.
 
-`foreign`, calls, pipelines, `!`, comparisons, `%`, and `^` still parse and dump
+`foreign`, pipelines, `!`, comparisons, `%`, and `^` still parse and dump
 as ASTs, but IR mode reports them as unsupported at their source location. Use
 `x * x` for squaring in this increment. Duplicate function definitions and
 unknown names are also errors.
@@ -269,7 +269,46 @@ The compiler emits IR; it has no JIT or automatic entry point. A host program
 can compile and link the generated functions, as the test below demonstrates.
 Top-level wrappers are emitted but are not invoked automatically.
 
-### Check this increment
+## LLVM increment 2: function calls
+
+Functions can now call previously defined Q functions:
+
+```q
+fn square(x) => x * x;
+fn loss(prediction, target) => square(prediction - target);
+loss(7, 4);
+```
+
+Generate IR for this example with:
+
+```sh
+./qlang --emit-llvm examples/calls.q > calls.ll
+llvm-as calls.ll -o /tmp/q-calls.bc
+```
+
+`IRGenerator::emitExpression()` handles `CallExprAST` by looking up the callee
+in the module, checking the argument count, generating argument expressions
+from left to right, and using `IRBuilder::CreateCall`. Arguments and the result
+are still `double`. For `loss`, the body includes:
+
+```llvm
+%sub = fsub double %prediction, %target
+%call = call double @square(double %sub)
+ret double %call
+```
+
+Nested calls such as `square(square(2))` and calls to functions with no
+parameters work. A function becomes visible when its definition starts, so
+calls to later definitions are errors. A function can reference itself, but
+there is no conditional base case yet; executing such recursion will not
+terminate normally. Calls use named functions, not function-valued parameters.
+
+Unknown functions, incorrect argument counts, and errors inside arguments
+produce line-and-column diagnostics and no IR. For example, `square(1, 2)`
+reports `incorrect argument count for 'square': expected 1, got 2`.
+`foreign` declarations and pipelines remain separate future increments.
+
+### Check the IR increments
 
 After building the LLVM-enabled `qlang`, run:
 
@@ -279,16 +318,17 @@ python3 tests/test_ir.py ./qlang
 
 The test requires `llvm-as` and `clang` on `PATH` (overridable with `LLVM_AS` and
 `CLANG`). It assembles the IR, compiles it with a small C caller, and checks
-numeric results, parameter scope, rejected features, diagnostics, and AST mode.
+numeric results, nested and zero-argument calls, argument order, definition
+order, parameter scope, rejected features, diagnostics, and AST mode.
 Temporary build files are cleaned up automatically.
 
 ## Small increments toward Python-style ML
 
-Review and commit this scalar IR increment before adding the next feature.
-Suggested commit message: `Add LLVM IR emission for scalar arithmetic functions`.
+Review and commit the function-call increment before adding the next feature.
+Suggested commit message: `Add LLVM IR generation for function calls`.
 
-1. **Next:** `foreign` declarations and function calls, including argument-count
-   checks and agreement between declarations and definitions.
+1. **Next:** `foreign` declarations, including agreement between declarations
+   and definitions, so Q can call native math functions.
 2. Lower `value |> scale(2)` to `scale(value, 2)`, evaluating the value once.
 3. Define truth values, comparisons, power, and remainder semantics.
 4. Add Python-style `def`, `return`, and indentation in a separate parser change;
