@@ -1,8 +1,8 @@
 # Q
 
 A small language and compiler you can read in one C++ file. Q currently turns
-scalar arithmetic and function calls into LLVM IR, with a longer-term goal of
-a Python-style language for machine learning.
+scalar arithmetic, function calls, and native declarations into LLVM IR, with
+a longer-term goal of a Python-style language for machine learning.
 
 ```q
 fn square(x) => x * x;
@@ -62,7 +62,8 @@ command line. `make clean` removes the two compiler binaries.
 │   └── qlang.cpp      # Lexer, AST, IR generator, parser, and CLI
 ├── examples/
 │   ├── scalars.q      # Arithmetic building blocks
-│   └── calls.q        # Composing functions
+│   ├── calls.q        # Composing functions
+│   └── foreign.q      # Native math functions
 ├── tests/
 │   └── test_ir.py     # IR and native execution checks
 └── docs/
@@ -78,6 +79,8 @@ Read [the language guide](docs/QL.md) for syntax, supported operations, IR
 examples, and the next small increments. [LLVM notes](docs/llvm.md) link to
 the tutorials behind the implementation.
 
-The next feature is `foreign` declarations. Pipelines, Python-style blocks,
-and tensor support are later steps. Each feature should stay small enough to
+Native calls such as `sqrt` and `exp` are available through `foreign`
+declarations; see [the native linking example](docs/QL.md#linking-native-code).
+The next feature is pipelines, followed by Python-style blocks and tensor
+support in later steps. Each feature should stay small enough to
 review with its example, tests, and documentation.

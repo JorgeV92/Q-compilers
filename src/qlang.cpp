@@ -25,7 +25,7 @@
 #endif
 
 // Q's front end remains usable without LLVM. Define Q_ENABLE_LLVM to build
-// scalar arithmetic, single-expression functions, and calls to Q functions.
+// scalar arithmetic, single-expression functions, and Q/native function calls.
 
 namespace q {
 
@@ -508,7 +508,7 @@ private:
 
 #ifdef Q_ENABLE_LLVM
 //===----------------------------------------------------------------------===//
-// LLVM IR: scalar arithmetic functions and calls
+// LLVM IR: scalar arithmetic, function calls, and foreign declarations
 //===----------------------------------------------------------------------===//
 
 // Use the AST's existing accessors so parsing and dumping stay LLVM-independent.
@@ -520,6 +520,10 @@ public:
       if (const auto *function = dynamic_cast<const FunctionAST *>(item.get())) {
         if (!emitFunction(function->prototype(), function->body()))
           return false;
+      } else if (const auto *foreign =
+                     dynamic_cast<const ForeignAST *>(item.get())) {
+        if (!emitPrototype(foreign->prototype()))
+          return false;
       } else if (const auto *expression =
                      dynamic_cast<const TopLevelExprAST *>(item.get())) {
         // A dot cannot occur in a Q identifier, preventing user-name collisions.
@@ -528,8 +532,7 @@ public:
         if (!emitFunction(prototype, expression->expression()))
           return false;
       } else {
-        error(item->location(),
-              "LLVM IR for 'foreign' is not supported in this increment");
+        error(item->location(), "unsupported top-level item");
         return false;
       }
     }
@@ -598,7 +601,7 @@ private:
     }
 
     if (const auto *call = dynamic_cast<const CallExprAST *>(&expression)) {
-      // Functions enter the module in source order; later definitions are unknown.
+      // A definition or foreign declaration must appear before the call.
       llvm::Function *callee = module_.getFunction(call->callee());
       if (!callee)
         return error(call->location(), "unknown function '" + call->callee() + "'");
@@ -622,17 +625,34 @@ private:
                  "LLVM IR for pipelines is not supported in this increment");
   }
 
+  llvm::Function *emitPrototype(const PrototypeAST &prototype) {
+    llvm::Type *numberType = llvm::Type::getDoubleTy(context_);
+    std::vector<llvm::Type *> parameters(prototype.parameters().size(), numberType);
+    auto *type = llvm::FunctionType::get(numberType, parameters, false);
+    if (auto *existing = module_.getFunction(prototype.name())) {
+      if (existing->getFunctionType() != type) {
+        error(prototype.location(),
+              "conflicting signature for '" + prototype.name() +
+                  "': expected " + std::to_string(existing->arg_size()) +
+                  ", got " + std::to_string(parameters.size()));
+        return nullptr;
+      }
+      return existing;
+    }
+    return llvm::Function::Create(type, llvm::Function::ExternalLinkage,
+                                  prototype.name(), module_);
+  }
+
   bool emitFunction(const PrototypeAST &prototype, const ExprAST &body) {
-    if (module_.getFunction(prototype.name())) {
+    llvm::Function *function = emitPrototype(prototype);
+    if (!function)
+      return false;
+    if (!function->empty()) {
       error(prototype.location(), "duplicate function '" + prototype.name() + "'");
       return false;
     }
 
-    llvm::Type *numberType = llvm::Type::getDoubleTy(context_);
-    std::vector<llvm::Type *> parameters(prototype.parameters().size(), numberType);
-    auto *type = llvm::FunctionType::get(numberType, parameters, false);
-    auto *function = llvm::Function::Create(type, llvm::Function::ExternalLinkage,
-                                          prototype.name(), module_);
+    // Parameter names come from the definition, not an earlier declaration.
     namedValues_.clear();
     std::size_t index = 0;
     for (auto &argument : function->args()) {

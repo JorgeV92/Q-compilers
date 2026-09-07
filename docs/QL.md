@@ -11,9 +11,10 @@ JIT—but it has its own source syntax and room for its own semantics.
 4. The optional **IR generator** translates scalar arithmetic functions to LLVM IR.
 
 The long-term goal is a Python-style language for machine learning and deep
-learning. The first two LLVM increments support numeric expressions, function
-parameters, and calls between Q functions. Python-style blocks, tensors, and training
-are future work; the current Q syntax remains the foundation.
+learning. The first three LLVM increments support numeric expressions, function
+parameters, calls between Q functions, and native function declarations.
+Python-style blocks, tensors, and training are future work; the current Q
+syntax remains the foundation.
 
 The compiler is in [src/qlang.cpp](../src/qlang.cpp), with runnable inputs in
 [examples/](../examples/) and checks in [tests/](../tests/). See the
@@ -251,7 +252,7 @@ uses LLVM floating-point behavior rather than raising a Python exception.
 There are no integer or boolean types yet. A name must refer to a parameter of
 the current function; parameter names do not carry over to other functions.
 
-`foreign`, pipelines, `!`, comparisons, `%`, and `^` still parse and dump
+Pipelines, `!`, comparisons, `%`, and `^` still parse and dump
 as ASTs, but IR mode reports them as unsupported at their source location. Use
 `x * x` for squaring in this increment. Duplicate function definitions and
 unknown names are also errors.
@@ -314,15 +315,90 @@ ret double %call
 ```
 
 Nested calls such as `square(square(2))` and calls to functions with no
-parameters work. A function becomes visible when its definition starts, so
-calls to later definitions are errors. A function can reference itself, but
+parameters work. A function becomes visible when its definition or a `foreign`
+declaration appears. Calling a later function requires an earlier declaration
+(see increment 3). A function can reference itself, but
 there is no conditional base case yet; executing such recursion will not
 terminate normally. Calls use named functions, not function-valued parameters.
 
 Unknown functions, incorrect argument counts, and errors inside arguments
 produce line-and-column diagnostics and no IR. For example, `square(1, 2)`
 reports `incorrect argument count for 'square': expected 1, got 2`.
-`foreign` declarations and pipelines remain separate future increments.
+Pipelines remain a separate future increment.
+
+## LLVM increment 3: foreign declarations
+
+`foreign` now emits a function declaration in LLVM IR. This lets Q formulas
+use native math functions:
+
+```q
+foreign sqrt(value);
+foreign exp(value);
+fn norm2(x, y) => sqrt(x * x + y * y);
+fn sigmoid(x) => 1 / (1 + exp(-x));
+```
+
+Build and inspect [examples/foreign.q](../examples/foreign.q):
+
+```sh
+make
+./build/qlang --emit-llvm examples/foreign.q > build/foreign.ll
+llvm-as build/foreign.ll -o build/foreign.bc
+```
+
+The module contains declarations such as `declare double @sqrt(double)`.
+`emitPrototype()` creates or reuses the LLVM function and checks its signature;
+`emitFunction()` adds a body only when one does not already exist. The existing
+call generator handles both native and Q functions. This follows the declaration
+and definition distinction in [LLVM Chapter 3](https://releases.llvm.org/20.1.0/docs/tutorial/MyFirstLanguageFrontend/LangImpl03.html#function-code-generation).
+
+### Declaration rules
+
+- A declaration must appear before its first use.
+- All parameters and the return value are `double`, using the C calling
+  convention. The native implementation must have that exact signature;
+  strings, pointers, `void` returns, and variadic functions are not supported.
+- Repeated declarations with the same parameter count reuse one symbol, even
+  when their parameter names differ. A matching declaration after a definition
+  is also allowed.
+- A later Q definition may supply the body. Its parameter names determine the
+  body's scope; names from earlier declarations do not become local variables.
+- Conflicting parameter counts and a second function body are errors. As with
+  other code-generation errors, the compiler prints no partial IR.
+
+For example, a declaration can allow a call to a later Q function:
+
+```q
+foreign shifted(original);
+fn use_shifted(x) => shifted(x);
+fn shifted(value) => value + 1;
+```
+
+### Linking native code
+
+A declaration does not load a library or check whether the native symbol
+exists. Native functions are resolved when you link the generated code. Math
+functions in this example need the system math library (`-lm`). An unresolved
+symbol is a linker error, not a Q syntax error.
+
+To try `norm2` and `sigmoid`, create a small host program and link it with the IR:
+
+```sh
+cat > build/foreign_host.c <<'C'
+#include <stdio.h>
+extern double norm2(double, double);
+extern double sigmoid(double);
+int main(void) {
+  printf("norm2: %.1f, sigmoid: %.1f\n", norm2(3, 4), sigmoid(0));
+  return 0;
+}
+C
+clang build/foreign.ll build/foreign_host.c -lm -o build/foreign-demo
+./build/foreign-demo
+```
+
+This prints `norm2: 5.0, sigmoid: 0.5`. The Q compiler still only emits IR;
+the host program explicitly calls the generated functions.
 
 ### Check the IR increments
 
@@ -337,7 +413,9 @@ selects `llvm-as` from the `LLVM_CONFIG` installation and uses `clang` on `PATH`
 both tools are overridable with `LLVM_AS` and `CLANG`. The test assembles the
 IR, compiles it with a small C caller, and checks
 numeric results, nested and zero-argument calls, argument order, definition
-order, parameter scope, rejected features, diagnostics, and AST mode.
+order, parameter scope, rejected features, diagnostics, and AST mode. Foreign
+checks link against native math and custom C functions, exercise repeated and
+forward declarations, and reject conflicting signatures or duplicate bodies.
 Temporary build files are cleaned up automatically.
 
 ## Small increments toward Python-style ML
@@ -345,13 +423,11 @@ Temporary build files are cleaned up automatically.
 Keep each language feature in its own commit with its example and tests.
 Review layout changes separately from language changes.
 
-1. **Next:** `foreign` declarations, including agreement between declarations
-   and definitions, so Q can call native math functions.
-2. Lower `value |> scale(2)` to `scale(value, 2)`, evaluating the value once.
-3. Define truth values, comparisons, power, and remainder semantics.
-4. Add Python-style `def`, `return`, and indentation in a separate parser change;
+1. **Next:** Lower `value |> scale(2)` to `scale(value, 2)`, evaluating the value once.
+2. Define truth values, comparisons, power, and remainder semantics.
+3. Add Python-style `def`, `return`, and indentation in a separate parser change;
    then local bindings and control flow in further increments.
-5. Design tensor types and shapes before adding tensor operations, a runtime,
+4. Design tensor types and shapes before adding tensor operations, a runtime,
    automatic differentiation, or accelerator support.
 
 Each increment should include one working example, focused validation, and its
